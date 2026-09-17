@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-import ddddocr  # Librería local y offline para resolución de captcha
 
 # Configuración básica de logging para auditoría del bot
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -14,19 +13,17 @@ class RemajuAuthError(Exception):
     pass
 
 class RemajuAuthenticator:
-    def __init__(self, page, creds_path: str = "autenticacion.json"):
+    def __init__(self, page, resolver_ia, creds_path: str = "autenticacion.json"):
         """
-        Inicializa el handler de autenticación asíncrono.
-        :param page: Objeto de página de nodriver.
-        :param creds_path: Ruta al archivo JSON de credenciales de la raíz.
+        Inicializa el handler de autenticación asíncrono con Playwright.
+        :param page: Objeto de página (Page) de Playwright.
+        :param resolver_ia: Instancia única del resolvedor de captcha (CaptchaResolver).
+        :param creds_path: Ruta al archivo JSON de credenciales local.
         """
         self.page = page
+        self.ocr = resolver_ia
         self.creds_path = Path(creds_path)
         self.max_retries = 5
-        self.lock_timeout = 120  # Segundos de bloqueo exigidos
-
-        # Inicialización única de la red neuronal ddddocr con publicidad desactivada
-        self.ocr = ddddocr.DdddOcr(show_ad=False)
 
     def load_credentials(self) -> dict:
         """Carga y valida el archivo de credenciales local verificando el contrato fragmentado."""
@@ -36,126 +33,85 @@ class RemajuAuthenticator:
         
         with open(self.creds_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            if "usuario" not in data or "clave" not in data or "url_base" not in data or "url_login_path" not in data:
-                raise ValueError("El JSON debe contener las claves exactas 'usuario', 'clave', 'url_base' y 'url_login_path'.")
+            required_keys = ["usuario", "clave", "url_base", "url_login_path"]
+            if not all(k in data for k in required_keys):
+                raise ValueError(f"El JSON debe contener las claves exactas: {required_keys}")
             return data
 
-    async def _wait_for_spinner_to_disappear(self):
-        """
-        Espera activamente a que el spinner 'dlgEstado' desaparezca del DOM.
-        Se usa evaluación JS para evitar excepciones de elementos no encontrados.
-        """
-        logger.info("Esperando que el spinner 'dlgEstado' desaparezca...")
-        for _ in range(40):  # Timeout máximo de 20 segundos (40 iteraciones * 0.5s)
-            is_visible = await self.page.evaluate("""
-                () => {
-                    const el = document.getElementById('dlgEstado');
-                    return el ? window.getComputedStyle(el).display !== 'none' : false;
-                }
-            """)
-            if not is_visible:
-                logger.info("Spinner de la plataforma oculto.")
-                await asyncio.sleep(0.5)
-                return
-            await asyncio.sleep(0.5)
-        
-        logger.warning("Tiempo de espera agotado para el spinner. Continuando flujo...")
-
-    async def resolve_captcha(self, captcha_element) -> str:
-        """
-        Captura el elemento de imagen de nodriver en formato bytes y lo procesa de forma local.
-        """
-        if not captcha_element:
-            logger.error("El elemento de imagen del captcha no fue encontrado en el DOM.")
-            return ""
-
-        logger.info("Procesando captcha localmente con ddddocr...")
-        try:
-            # Obtención de bytes nativos asíncronos en memoria sin tocar disco
-            image_bytes = await captcha_element.save_screenshot()
-            
-            # Clasificación local de la red neuronal offline
-            text_result = self.ocr.classification(image_bytes)
-            logger.info(f"Texto del captcha clasificado con éxito: {text_result}")
-            return str(text_result).strip()
-        except Exception as e:
-            logger.error(f"Error durante el procesamiento local de ddddocr: {str(e)}")
-            return ""
-
     async def execute_login(self) -> bool:
-        """Flujo principal asíncrono de autenticación ingresando dinámicamente desde la URL del JSON."""
+        """Flujo principal asíncrono de autenticación importado del script de Colab."""
         creds = self.load_credentials()
-
-        # Ensamblaje dinámico y seguro de las cadenas de dirección web
         target_login_url = f"{creds['url_base']}{creds['url_login_path']}"
 
-        logger.info(f"Navegando a la dirección web ensamblada: {target_login_url}")
-        await self.page.get(target_login_url)
+        logger.info(f"[INFO] 0. Cargando la página: {target_login_url}")
+        await self.page.goto(target_login_url)
+        await self.page.wait_for_load_state("domcontentloaded")
 
-        # 2. Control de latencia inicial de carga de página
-        await self._wait_for_spinner_to_disappear()
-
-        logger.info("Esperando 3 segundos para asegurar la carga completa y transiciones del modal legal...")
-        await asyncio.sleep(3.0)
-
-        # 3. Cerrar Modal Legal de Indicaciones de REMAJU
-        logger.info("Verificando existencia de modal legal...")
+        logger.info("[INFO] 1. Evaluando modal de bienvenida...")
         try:
-            btn_aceptar = await asyncio.wait_for(self.page.find("Aceptar"), timeout=5.0)
-            await btn_aceptar.click()
-            logger.info("Modal legal cerrado con éxito.")
-            await asyncio.sleep(1) 
-        except (asyncio.TimeoutError, Exception):
-            logger.warning("No se pudo interactuar con el modal legal o no apareció. Continuando flujo...")
+            # Usar los selectores exactos verificados del script de Colab
+            await self.page.wait_for_selector("button[id='btnAceptarPopup']", state="visible", timeout=4000)
+            await self.page.click("button[id='btnAceptarPopup']")
+            await self.page.wait_for_selector("div[id='dlgPopUp']", state="hidden", timeout=4000)
+            logger.info("[OK] Modal cerrado.")
+        except Exception:
+            logger.info("No se detectó el popup de bienvenida en el DOM actual. Continuando...")
 
-        # 4. Bucle de Control del Captcha e Inyección (Algoritmo Rígido adaptado a PrimeFaces)
-        for attempt in range(1, self.max_retries + 1):
-            logger.info(f"Intento de inicio de sesión {attempt}/{self.max_retries}...")
+        logger.info("[INFO] 2. Seleccionando 'Con Casilla'...")
+        await self.page.click("span:has-text('Con Casilla')")
+        await self.page.wait_for_timeout(1000)
+
+        logger.info("[INFO] 3. Iniciando proceso de Login y Captcha (Max 5 intentos)...")
+        login_exitoso = False
+
+        for intento in range(self.max_retries):
+            logger.info(f"\n--- Intento {intento + 1} de 5 ---")
             
-            logger.info("Seleccionando e inyectando credenciales en el formulario...")
-            btn_con_casilla = await self.page.find("Con Casilla")
-            if btn_con_casilla:
-                await btn_con_casilla.click()
-
-            txt_usuario = await self.page.select("[id='frmLogin:usuario']")
-            await txt_usuario.click()
-            await txt_usuario.send_keys(creds["usuario"])
-
-            # Al refrescar la vista por fallo en captcha, JSF limpia obligatoriamente la clave
-            txt_clave = await self.page.select("[id='frmLogin:claveConCasilla']")
-            await txt_clave.click()
-            await txt_clave.send_keys(creds["clave"])
+            # Inyección de Usuario + Simulación de Hardware de tecla Tab
+            await self.page.locator("[id='frmLogin:usuario']").fill(creds["usuario"])
+            await self.page.locator("[id='frmLogin:usuario']").press("Tab")
             
-            # Localizar de manera tolerante la imagen dinámica del captcha
-            captcha_img_element = await self.page.select("img.captcha-image-fix")
-            if not captcha_img_element:
-                 captcha_img_element = await self.page.select("[id='frmLogin:captcha_image']")
+            # Inyección de Contraseña + Simulación de Hardware de tecla Tab
+            await self.page.locator("[id='frmLogin:claveConCasilla']").fill(creds["clave"])
+            await self.page.locator("[id='frmLogin:claveConCasilla']").press("Tab")
+
+            # Localizar el elemento del captcha oficial
+            selector_imagen = "img[id='frmLogin:imgCaptcha']"
+            await self.page.wait_for_selector(selector_imagen, timeout=6000)
+            elemento_imagen = self.page.locator(selector_imagen).first
+
+            # Captura de screenshot en memoria y resolución offline con la IA local
+            image_bytes = await elemento_imagen.screenshot()
+            texto_limpio = self.ocr.resolver_bytes(image_bytes)
+            logger.info(f"[OK] Captcha descifrado (IA): '{texto_limpio}'")
+
+            # Inyección de texto de Captcha + Simulación de Hardware de tecla Tab
+            await self.page.locator("[id='frmLogin:captcha']").fill(texto_limpio)
+            await self.page.locator("[id='frmLogin:captcha']").press("Tab")
             
-            # Invocar la resolución local de ddddocr
-            captcha_text = await self.resolve_captcha(captcha_img_element)
+            # Click real sobre el botón de sumisión oficial de Colab
+            await self.page.click("button[id='frmLogin:btnLogin']")
+
+            # Carrera asíncrona concurrente de Playwright para interceptar redirección o alerta Growl
+            task_url = asyncio.create_task(self.page.wait_for_url("**/inicio.xhtml", timeout=5000))
+            task_growl = asyncio.create_task(self.page.wait_for_selector("div.ui-growl-item", state="visible", timeout=5000))
+
+            done, pending = await asyncio.wait([task_url, task_growl], return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+
+            if task_url in done and not task_url.exception():
+                logger.info("[OK] Login exitoso.")
+                login_exitoso = True
+                break
+            elif task_growl in done and not task_growl.exception():
+                mensaje_web = await self.page.locator("div.ui-growl-item p").first.inner_text()
+                logger.warning(f"[WARNING] Error en login: {mensaje_web}")
+                # Estabilización de red antes de comenzar la nueva vuelta parcial de AJAX
+                await self.page.wait_for_timeout(2000)
+
+        if not login_exitoso:
+            logger.error("[ERROR] Se agotaron los intentos de Login. Abortando.")
+            return False
             
-            # Inyectar el resultado resuelto
-            txt_captcha_input = await self.page.select("[id='frmLogin:captcha']")
-            await txt_captcha_input.click()
-            await txt_captcha_input.send_keys(captcha_text)
-
-            btn_submit = await self.page.select("[id='frmLogin:btnIngresar']") 
-            if not btn_submit:
-                 btn_submit = await self.page.find("Iniciar Sesión")
-            await btn_submit.click()
-
-            # Esperar el procesamiento asíncrono del servidor antes de evaluar la URL
-            await self._wait_for_spinner_to_disappear()
-
-            # Validar si el árbol de componentes redirigió a la vista xhtml interna de éxito
-            current_url = await self.page.evaluate("window.location.href")
-            if "inicio.xhtml" in current_url:
-                logger.info("¡Autenticación exitosa! Redirección a inicio.xhtml confirmada.")
-                return True
-            
-            logger.warning("Fallo en la autenticación (captcha incorrecto). El formulario se ha limpiado.")
-
-        # 5. Activación obligatoria del candado de tiempo si se agotan las oportunidades
-        logger.error(f"Límite de {self.max_retries} intentos alcanzado. Aplicando bloqueo de seguridad de {self.lock_timeout}s.")
-        await asyncio.sleep(self.lock_timeout)
-        raise RemajuAuthError("Error crítico: Límite de intentos de captcha agotado. Bloqueo de seguridad activado.")
+        return True
