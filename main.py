@@ -1,4 +1,3 @@
-# src/main.py
 import os
 import sys
 import json
@@ -19,6 +18,65 @@ from src.scraper.extractor import RemajuExtractorScraper
 
 # Carga de la clase del servicio OCR local y offline de ddddocr
 from src.scraper.ocr_service import CaptchaResolver
+
+# Carga de los componentes nativos institucionales de Google Drive del script estable de Colab
+import datetime
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+# Configuración de Google Drive heredada al 100% de tu script estable de Colab
+CARPETA_RAIZ_ID = "1lsNX5GEiM7-Ho2kTbu00AqfckAnyWyFl"
+SCOPES = ['https://www.googleapis.com/auth/drive','https://www.googleapis.com/auth/drive.readonly']
+
+def subir_pdf_a_google_drive(ruta_archivo_local, nombre_archivo):
+    """Función de persistencia atómica nativa original del script estable de Colab."""
+    try:
+        load_dotenv()
+        PRIVATE_KEY_RAW = os.getenv("GOOGLE_PRIVATE_KEY", "")
+        FORMATTED_PRIVATE_KEY = PRIVATE_KEY_RAW.replace('\\n', '\n')
+        CREDENTIALS_DICT = {
+            "type": "service_account",
+            "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+            "private_key": FORMATTED_PRIVATE_KEY,
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('GOOGLE_CLIENT_EMAIL')}"
+        }
+        creds = service_account.Credentials.from_service_account_info(CREDENTIALS_DICT, scopes=SCOPES)
+        service = build('drive', 'v3', credentials=creds)
+
+        nombre_carpeta_dia = datetime.datetime.now().strftime('%Y-%m-%d')
+
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta_dia}' and '{CARPETA_RAIZ_ID}' in parents and trashed=false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        folders = results.get('files', [])
+
+        if folders:
+            id_carpeta_dia = folders[0]['id']
+        else:
+            folder_metadata = {
+                'name': nombre_carpeta_dia,
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [CARPETA_RAIZ_ID]
+            }
+            folder = service.files().create(body=folder_metadata, fields='id').execute()
+            id_carpeta_dia = folder.get('id')
+            print(f"  -> [DRIVE] Carpeta creada para la fecha: {nombre_carpeta_dia}")
+
+        file_metadata = {
+            'name': nombre_archivo,
+            'parents': [id_carpeta_dia]
+        }
+        media = MediaFileUpload(ruta_archivo_local, resumable=True)
+        file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+        print(f"  -> [OK] PDF subido exitosamente a Google Drive (ID: {file.get('id')})")
+        return file.get('id')
+    except Exception as e:
+        print(f"  -> [WARNING] No se pudo subir el archivo a Google Drive: {e}")
+        return None
 
 # Configuración global del sistema de bitácoras (Logging)
 logging.basicConfig(
@@ -48,8 +106,8 @@ async def main():
     captcha_builder = CaptchaResolver()
     
     # Definición de variables de entorno y parámetros de negocio
-    url_api_backend = "https://koyeb.app"
-    tipo_inmueble_filtro = "1"  # Código de filtro: Casa, departamento, etc.
+    url_api_backend = "https://backendremaju.koyeb.app/registrar-remate-judicial"
+    tipo_inmueble_filtro = "1"  # Mantenido por firma de compatibilidad
     ruta_local_descargas = './descargas_resoluciones'
     
     # 3. Lanzar el contexto asíncrono nativo de Playwright
@@ -171,35 +229,34 @@ async def main():
                         
                         # === PASO C: EXTRAER DATOS INTEGRALES POR ESCENARIOS TABS ===
                         try:
-                            # Ejecuta la extracción de las 3 pestañas (Resumen, Inmuebles, Cronograma)
                             detalle_extraido = await extractor.extract_tab_remate_completo()
                             remates_pagina[i].update(detalle_extraido)
                         except Exception as e:
                             logger.error(f"  -> [ERROR] Falló la extracción de los escenarios por pestañas: {e}")
                             detalle_extraido = {"remate": {"expediente": numero_expediente}}
                             
-                        # === PASO D: DESCARGA DE PDF POR STREAM DE RED (SINO REPROCESA TAB) ===
+                        # === PASO D: DESCARGA DE PDF POR STREAM DE RED ===
                         nombre_pdf_descargado = await extractor.download_resolucion_pdf(numero_expediente, ruta_local_descargas)
                         
                         # === PASO E: ADAPTACIÓN DE DTO DINÁMICO Y PERSISTENCIA HÍBRIDA ===
                         dto_mapeado_final = extractor.adaptar_a_dto(remates_pagina[i], nombre_pdf_descargado)
                         remates_finales_json.append(dto_mapeado_final)
                         
-                        # Subir archivo PDF a la subcarpeta de la fecha en Google Drive si se descargó
+                        # Invocación directa a la función nativa global estable de Google Drive
                         if nombre_pdf_descargado:
                             ruta_local_pdf_completa = os.path.join(ruta_local_descargas, nombre_pdf_descargado)
                             if os.path.exists(ruta_local_pdf_completa):
                                 logger.info("  -> [DRIVE] Subiendo archivo PDF de resolución a Google Drive...")
-                                extractor.upload_pdf_to_google_drive(ruta_local_pdf_completa, nombre_pdf_descargado)
+                                subir_pdf_a_google_drive(ruta_local_pdf_completa, nombre_pdf_descargado)
                                 
-                        # Registrar en el historial de persistencia atómica de la raíz
+                        # Registrar en el historial de persistencia atómica
                         history_manager.save_processed(numero_expediente, numero_convocatoria)
                         
                         # Imprimir diagnóstico JSON en consola
                         print("\n[DIAGNÓSTICO JSON] Registro DTO único adaptado para transmisión:")
                         print(json.dumps(dto_mapeado_final, indent=4, ensure_ascii=False))
                         
-                        # Enviar el DTO de forma inmediata a la API de tu backend
+                        # Enviar el DTO a la API del backend
                         logger.info("[API] Transmitiendo registro hacia el ODM del Backend...")
                         try:
                             import aiohttp
@@ -221,6 +278,7 @@ async def main():
                             await page.wait_for_selector("div.card.azul", state="visible", timeout=15000)
                         except Exception as e:
                             logger.error(f"  -> [ERROR] Problema al regresar a la lista de resultados: {e}")
+                            
                         await extractor.esperar_sincronizacion_primefaces()
                         await asyncio.sleep(1.0)
                         
@@ -239,7 +297,7 @@ async def main():
                 archivo_salida = 'remates_extraidos.json'
                 with open(archivo_salida, 'w', encoding='utf-8') as f:
                     json.dump(remates_finales_json, f, indent=4, ensure_ascii=False)
-                logger.info(f"\n[ÉXITO] Copia de seguridad consolidada guardada en: {archivo_salida}")
+                logger.info(f"\n[ÉXITO] Todos los datos consolidados han sido guardados en: {archivo_salida}")
                 
             await browser.close()
             logger.info("Orquestación completada exitosamente con Playwright. Suite en verde.")

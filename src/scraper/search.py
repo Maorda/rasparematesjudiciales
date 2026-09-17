@@ -31,18 +31,20 @@ class RemajuSearchScraper:
         return True
 
     async def apply_search_filters(self, tipo_inm: str):
-        """Abre el acordeón de filtros de PrimeFaces e inyecta el código del tipo de inmueble."""
-        logger.info(f"[INFO] 8. Aplicando filtro de Inmueble (Código: {tipo_inm})...")
-        
-        accordion_header = self.page.locator("[id*='filtroTipoInmueble'], [id*='j_idt165_header']").first
-        if await accordion_header.count() > 0 and await accordion_header.get_attribute("aria-expanded") == "false":
-            await accordion_header.click()
-            await self.page.wait_for_timeout(500)
+        """Abre la bandeja de resultados y ejecuta la búsqueda masiva total sin restricciones."""
+        # =========================================================================================
+        # SE COMENTÓ EL ACCESO AL ACORDEÓN POR TIPO DE INMUEBLE PARA PROCESAR LA GRILLA MASIVA TOTAL
+        # =========================================================================================
+        # logger.info(f"[INFO] 8. Aplicando filtro de Inmueble (Código: {tipo_inm})...")
+        # accordion_header = self.page.locator("[id*='filtroTipoInmueble'], [id*='j_idt165_header']").first
+        # if await accordion_header.count() > 0 and await accordion_header.get_attribute("aria-expanded") == "false":
+        #     await accordion_header.click()
+        #     await self.page.wait_for_timeout(500)
+        # await self.page.select_option("select[id*='filtroTipoInmueble_input']", value=str(tipo_inm), force=True)
+        # await self.page.wait_for_timeout(500)
+        # =========================================================================================
 
-        # Inyección forzada en el select nativo oculto de PrimeFaces
-        await self.page.select_option("select[id*='filtroTipoInmueble_input']", value=str(tipo_inm), force=True)
-        await self.page.wait_for_timeout(500)
-
-        # Gatillar búsqueda asíncrona hacia el servidor de PrimeFaces
+        # Gatillar búsqueda masiva total directa hacia el servidor de PrimeFaces
+        logger.info("[INFO] 8. Gatillando búsqueda masiva total sin restricciones de propiedad...")
         btn_buscar = self.page.locator("button:has-text('Buscar'), button[id*='j_idt177']").first
         await btn_buscar.click()

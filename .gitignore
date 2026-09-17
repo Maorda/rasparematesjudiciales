@@ -67,6 +67,8 @@ instance/
 
 # Scrapy stuff:
 .scrapy
+.descarga_resoluciones/*
+descarga_resoluciones/*
 
 # Sphinx documentation
 docs/_build/
